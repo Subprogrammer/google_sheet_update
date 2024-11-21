@@ -1,55 +1,81 @@
-import time
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+import os
 import pandas as pd
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
-class FileChangeHandler(FileSystemEventHandler):
-    def on_modified(self, event):
-        if event.src_path.endswith("data.xlsx"):
-            print("Файл data.xlsx изменён. Обновляем Google Таблицу...")
-            update_google_sheet()
+# Создание временного файла credentials.json из переменной окружения
+def create_temp_credentials_file():
+    credentials_content = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if not credentials_content:
+        raise ValueError("Переменная GOOGLE_APPLICATION_CREDENTIALS не задана!")
+    
+    temp_credentials_path = "/tmp/credentials.json"
+    with open(temp_credentials_path, "w") as temp_file:
+        temp_file.write(credentials_content)
+    
+    return temp_credentials_path
 
+# Инициализация Google Sheets API
+def initialize_google_client():
+    credentials_path = create_temp_credentials_file()
+    credentials = Credentials.from_service_account_file(credentials_path)
+    return gspread.authorize(credentials)
 
-columns = ['ФИО', 'Должность', 'ДВ', 'Институт', 'Группа', 'Кафедра', 'Шифр', 
-           'Телеграмм', 'ВК', 'Телефон', 'Почта', 'Отдел', 'День рождения']
-
-def update_google_sheet():
+# Функция для обновления Google Sheet
+def update_google_sheet(file_path, sheet_name, worksheet_index=0):
     try:
-        excel_file = 'data.xlsx'  # Имя файла с данными
-        df = pd.read_excel(excel_file)  # Чтение данных в DataFrame
-        df = df.replace([float('inf'), float('-inf'), float('nan')], None)
-        df = df.fillna("")  # Заполнить NaN пустыми строками
+        # Чтение Excel-файла
+        df = pd.read_excel(file_path)
 
-        # Настройка Google Sheets API
-        scope = ["https://spreadsheets.google.com/feeds", 
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive.file", 
-                "https://www.googleapis.com/auth/drive"]
-        
-        creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
-        client = gspread.authorize(creds)
+        # Авторизация Google Sheets
+        client = initialize_google_client()
 
-        # Открытие нужной таблицы и запись данных
-        sheet = client.open('Студенты').sheet1  # Открытие первого листа
+        # Открытие таблицы и выбор листа
+        sheet = client.open(sheet_name).get_worksheet(worksheet_index)
+
+        # Очистка листа
+        sheet.clear()
+
+        # Запись данных из DataFrame в Google Sheets
         sheet.update([df.columns.values.tolist()] + df.values.tolist())
-        print("Данные успешно обновлены в Google Таблице!")
+        print(f"Таблица '{sheet_name}' успешно обновлена!")
     except Exception as e:
-        print(f"Ошибка при обновлении таблицы: {e}")
+        print(f"Ошибка обновления Google Sheets: {e}")
 
+# Класс для обработки изменений в файле
+class FileChangeHandler(FileSystemEventHandler):
+    def __init__(self, file_path, sheet_name):
+        self.file_path = file_path
+        self.sheet_name = sheet_name
 
+    def on_modified(self, event):
+        if event.src_path == self.file_path:
+            print(f"Изменения обнаружены в {self.file_path}. Обновляю Google Sheets...")
+            update_google_sheet(self.file_path, self.sheet_name)
+
+# Главный код
 if __name__ == "__main__":
-    event_handler = FileChangeHandler()
+    # Путь к локальному Excel-файлу
+    excel_file_path = "data.xlsx"
+    google_sheet_name = "Студенты"
+
+    # Проверка, существует ли файл
+    if not os.path.exists(excel_file_path):
+        print(f"Файл {excel_file_path} не найден!")
+        exit(1)
+
+    # Настройка наблюдения за изменениями
+    event_handler = FileChangeHandler(excel_file_path, google_sheet_name)
     observer = Observer()
-    observer.schedule(event_handler, path=".", recursive=False)
-    print("Наблюдение за файлом data.xlsx запущено.")
+    observer.schedule(event_handler, path=os.path.dirname(excel_file_path), recursive=False)
+    observer.start()
+
+    print(f"Наблюдение за изменениями в файле {excel_file_path} запущено...")
     try:
-        observer.start()
         while True:
-            time.sleep(1)
+            pass  # Основной цикл, пока приложение работает
     except KeyboardInterrupt:
         observer.stop()
     observer.join()
-
-
